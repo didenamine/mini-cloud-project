@@ -1,0 +1,99 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      DOCKER_APP_IMAGE: didenamine/mini-cloud-app
+      DOCKER_NGINX_IMAGE: didenamine/mini-cloud-nginx
+
+    steps:
+      # 1️⃣ Checkout the repo
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2️⃣ Set up Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # 3️⃣ Log in to Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # 4️⃣ Build and push App image
+      - name: Build & push app image
+        run: |
+          docker build -t $DOCKER_APP_IMAGE:${{ github.sha }} ./app
+          docker push $DOCKER_APP_IMAGE:${{ github.sha }}
+
+      # 5️⃣ Build and push Nginx image
+      - name: Build & push nginx image
+        run: |
+          docker build -t $DOCKER_NGINX_IMAGE:${{ github.sha }} ./nginx
+          docker push $DOCKER_NGINX_IMAGE:${{ github.sha }}
+
+      # 6️⃣ Start Docker Compose stack with all services
+      - name: Start Docker Compose stack
+        run: |
+          docker compose down
+          DOCKER_IMAGE_TAG=${{ github.sha }} docker compose up -d --build --scale app=2
+        working-directory: ${{ github.workspace }}
+
+      # 7️⃣ Wait for services to be ready
+      - name: Wait for services
+        run: |
+          echo "Waiting 5s for MySQL, Redis, and App to start..."
+          sleep 5
+      - name: Show logs (debug)
+        run: docker compose logs
+      # 8️⃣ Run health checks for App
+      - name: Health check
+        run: |
+           for i in {1..20}; do
+              echo "Attempt $i..."
+
+              STATUS_APP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/tasks || echo 000)
+              STATUS_NGINX=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/tasks || echo 000)
+
+              if [ "$STATUS_APP" = "200" ] || [ "$STATUS_NGINX" = "200" ]; then
+                echo "App is healthy ✅"
+                exit 0
+              fi
+
+                echo "Waiting... App:$STATUS_APP Nginx:$STATUS_NGINX"
+                sleep 5
+           done
+
+           echo "App did not become healthy ❌"
+           docker compose logs
+           exit 1
+      # 9️⃣ Show running containers (monitoring)
+      - name: Show running containers
+        run: docker ps -a
+      - name: API Tests (clean)
+        run: |
+            set -e
+
+            curl -f http://localhost/tasks
+
+            curl -f -X POST http://localhost/tasks \
+             -H "Content-Type: application/json" \
+             -d '{"title":"CI Task"}'
+            sleep 5
+            curl -f http://localhost/tasks
+
+            curl -f -X DELETE http://localhost/tasks/1
+
+            curl -f http://localhost/tasks
